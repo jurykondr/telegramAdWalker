@@ -1,1 +1,5 @@
 .idea/
+accounts/*.session
+data/*.json
+__pycache__/
+.env
