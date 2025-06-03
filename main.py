@@ -1,48 +1,86 @@
-import os
 import asyncio
+import json
+import logging
+import os
 
-from clicker import perform_action
-from account_manager import add_account
-from config import SESSION_DIR, ACCOUNTS
-from runner import run_mass_click
-from tdlib_ads import get_sponsored_url
-from tdlib_clicker import mass_click
+from core.tdlib_client import TdlibClient
+from aiotdlib.api import SearchPublicChat
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s - %(message)s"
+)
+
+CONFIG_PATH = "config/accounts.json"
+SESSION_PATH = "sessions"
 
 
-def list_sessions():
-    print("Доступные аккаунты:")
-    for f in os.listdir(SESSION_DIR):
-        if f.endswith('.session'):
-            print(f' - {f}')
+async def run_account(account):
+    phone = account["phone"]
+    api_id = account["api_id"]
+    api_hash = account["api_hash"]
+    channel = account.get("channel")
+    chat_id = account.get("chat_id")
+
+    logging.info(f"[{phone}] Запуск сессии...")
+
+    client = TdlibClient(
+        phone=phone,
+        api_id=api_id,
+        api_hash=api_hash,
+        session_path=SESSION_PATH
+    )
+
+    try:
+        await client.create_client()
+
+        if not chat_id and channel:
+            try:
+                logging.info(f"[{phone}] Ищем канал по имени: {channel}")
+                chat = await client.client.send(SearchPublicChat(username=channel))
+                if chat is None:
+                    logging.warning(f"[{phone}] Канал @{channel} не найден!")
+                    return
+                chat_id = chat.id
+            except Exception as e:
+                logging.warning(f"[{phone}] Ошибка при поиске канала @{channel}: {e}")
+                return
+
+        if not chat_id:
+            logging.warning(f"[{phone}] Ни channel, ни chat_id не указаны — пропускаем")
+            return
+
+        sponsored = await client.get_sponsored_message(chat_id)
+        if not sponsored or not sponsored.messages:
+            logging.warning(f"[{phone}] Рекламных сообщений не найдено")
+            return
+
+        msg = sponsored.messages[0]
+        url = msg.sponsor_info.link
+        logging.info(f"[{phone}] Найдена реклама: {url}")
+
+        await client.click_sponsored_message(chat_id, msg.id)
+
+        await client.handle_sponsored_link(url)
+
+    except Exception as e:
+        logging.error(f"[{phone}] Ошибка при обработке аккаунта: {e}")
+    finally:
+        logging.info(f"[{phone}] Останавливаем клиента")
+        await client.stop()
 
 
-if __name__ == '__main__':
-    print("=== Telegram Clicker: Управление аккаунтами ===")
-    action = input("Выберите действие: [1] Добавить аккаунт, [2] Показать аккаунты, [3] Перейти по ссылке, [4] Массовый переход, [5] Перейти по рекламе канала, [6] Массовый клик рекламы, [7] Авторизовать аккаунты → ")
+async def main():
+    if not os.path.exists(CONFIG_PATH):
+        logging.error("Файл конфигурации не найден: config/accounts.json")
+        return
 
-    if action == '1':
-        phone = input("Введите номер телефона (+79001234567): ")
-        add_account(phone)
-    elif action == '2':
-        list_sessions()
-    elif action == '3':
-        link = input("Введите Telegram-ссылку (t.me/...): ")
-        phone = input("Введите номер аккаунта, с которого выполнить: ")
-        asyncio.run(perform_action(phone, link))
-    elif action == '4':
-        link = input("Введите Telegram-ссылку (t.me/...): ")
-        asyncio.run(run_mass_click(link))
-    elif action == '5':
-        channel = input("Введите username канала (без t.me/): ")
-        phone = input("Введите номер телефона (+79001234567): ")
-        ad_url = asyncio.run(get_sponsored_url(channel, phone))
-        if ad_url:
-            print(f"[INFO] Начинаем массовый переход по {ad_url}")
-            asyncio.run(run_mass_click(ad_url))
-    elif action == '6':
-        channel = input("Введите username канала (без t.me/): ")
-        mass_click(channel, ['+79951579760'])
-    # elif action == '7':
-    #     auth_all_accounts(ACCOUNTS)
-    else:
-        print("Неверный выбор.")
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        accounts = json.load(f)
+
+    tasks = [run_account(account) for account in accounts]
+    await asyncio.gather(*tasks)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
