@@ -1,0 +1,28 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: telewalker-account-{{ .Values.phone_suffix }}
+spec:
+  template:
+    spec:
+      containers:
+      - name: telewalker
+        image: {{ .Values.image }}
+        imagePullPolicy: Never
+        env:
+        - name: PHONE
+          value: "{{ .Values.phone }}"
+        - name: API_ID
+          value: "{{ .Values.api_id }}"
+        - name: API_HASH
+          value: "{{ .Values.api_hash }}"
+        - name: CHANNEL
+          value: "{{ .Values.channel }}"
+        volumeMounts:
+        - name: session-storage
+          mountPath: /sessions
+      restartPolicy: Never
+      volumes:
+      - name: session-storage
+        emptyDir: {}
+  backoffLimit: 1

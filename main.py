@@ -1,56 +1,51 @@
+import os
+import logging
 import asyncio
 import json
-import logging
-import os
 
 from core.tdlib_client import TdlibClient
 from aiotdlib.api import SearchPublicChat
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 
-CONFIG_PATH = "config/accounts.json"
 SESSION_PATH = "sessions"
 
 
-async def run_account(account):
-    phone = account["phone"]
-    api_id = account["api_id"]
-    api_hash = account["api_hash"]
-    channel = account.get("channel")
-    chat_id = account.get("chat_id")
+async def main():
+    phone = os.environ.get("PHONE")
+    api_id = os.environ.get("API_ID")
+    api_hash = os.environ.get("API_HASH")
+    channel = os.environ.get("CHANNEL")
+
+    if not all([phone, api_id, api_hash]):
+        logging.error("Не заданы все переменные окружения (PHONE, API_ID, API_HASH)")
+        return
 
     logging.info(f"[{phone}] Запуск сессии...")
 
     client = TdlibClient(
         phone=phone,
-        api_id=api_id,
+        api_id=int(api_id),
         api_hash=api_hash,
-        session_path=SESSION_PATH
+        session_path=SESSION_PATH,
     )
 
     try:
         await client.create_client()
 
-        if not chat_id and channel:
-            try:
-                logging.info(f"[{phone}] Ищем канал по имени: {channel}")
-                chat = await client.client.send(SearchPublicChat(username=channel))
-                if chat is None:
-                    logging.warning(f"[{phone}] Канал @{channel} не найден!")
-                    return
-                chat_id = chat.id
-            except Exception as e:
-                logging.warning(f"[{phone}] Ошибка при поиске канала @{channel}: {e}")
-                return
-
-        if not chat_id:
-            logging.warning(f"[{phone}] Ни channel, ни chat_id не указаны — пропускаем")
+        chat = None
+        if channel:
+            logging.info(f"[{phone}] Ищем канал по имени: {channel}")
+            chat = await client.client.send(SearchPublicChat(username=channel))
+        else:
+            logging.warning(f"[{phone}] channel не задан — ничего не делаем")
             return
 
-        sponsored = await client.get_sponsored_message(chat_id)
+        if not chat:
+            logging.warning(f"[{phone}] Канал @{channel} не найден!")
+            return
+
+        sponsored = await client.get_sponsored_message(chat.id)
         if not sponsored or not sponsored.messages:
             logging.warning(f"[{phone}] Рекламных сообщений не найдено")
             return
@@ -59,27 +54,14 @@ async def run_account(account):
         url = msg.sponsor_info.link
         logging.info(f"[{phone}] Найдена реклама: {url}")
 
-        await client.click_sponsored_message(chat_id, msg.id)
-
+        await client.click_sponsored_message(chat.id, msg.id)
         await client.handle_sponsored_link(url)
 
     except Exception as e:
-        logging.error(f"[{phone}] Ошибка при обработке аккаунта: {e}")
+        logging.error(f"[{phone}] Ошибка: {e}")
     finally:
-        logging.info(f"[{phone}] Останавливаем клиента")
+        await client.client.idle()
         await client.stop()
-
-
-async def main():
-    if not os.path.exists(CONFIG_PATH):
-        logging.error("Файл конфигурации не найден: config/accounts.json")
-        return
-
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        accounts = json.load(f)
-
-    tasks = [run_account(account) for account in accounts]
-    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
