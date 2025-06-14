@@ -1,104 +1,68 @@
-import asyncio
-import logging
 import os
-import sys
-from dotenv import load_dotenv
-from aiotdlib import Client, ClientSettings
-from aiotdlib.api import API, UpdateAuthorizationState
+import logging
+import asyncio
+import json
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+from core.tdlib_client import TdlibClient
+from aiotdlib.api import SearchPublicChat
 
-# Загрузка переменных окружения из .env
-load_dotenv()
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 
-# Получение переменных окружения
-phone = os.getenv("PHONE")
-api_id = os.getenv("API_ID")
-api_hash = os.getenv("API_HASH")
-channel = os.getenv("CHANNEL")
+SESSION_PATH = "sessions"
 
-# Проверка наличия обязательных переменных
-if not all([phone, api_id, api_hash]):
-    logger.error("Не заданы все переменные окружения (PHONE, API_ID, API_HASH)")
-    sys.exit(1)
-
-async def auth_handler(update: UpdateAuthorizationState, client: Client):
-    """Обработчик авторизации"""
-    auth_state = update.authorization_state
-    if auth_state["@type"] == "authorizationStateWaitTdlibParameters":
-        database_dir = os.path.abspath(f"sessions/tdlib/{phone}")
-        os.makedirs(database_dir, exist_ok=True)
-        await client.api.set_tdlib_parameters(
-            api_id=int(api_id),
-            api_hash=api_hash,
-            database_directory=database_dir,
-            use_message_database=True,
-            use_secret_chats=True,
-            system_language_code="en",
-            device_model="Desktop",
-            application_version="1.0"
-        )
-    elif auth_state["@type"] == "authorizationStateWaitPhoneNumber":
-        await client.api.set_authentication_phone_number(phone_number=phone)
-    elif auth_state["@type"] == "authorizationStateWaitCode":
-        code = input("Enter SMS code: ")
-        await client.api.check_authentication_code(code=code)
-    elif auth_state["@type"] == "authorizationStateReady":
-        logger.info(f"[{phone}] Авторизация успешно завершена")
-
-async def search_channel(client: Client, channel_name: str):
-    """Поиск публичного канала по имени"""
-    try:
-        # Проверка состояния клиента
-        me = await client.api.get_me()
-        logger.info(f"[{phone}] Клиент авторизован как {me.first_name} {me.last_name or ''}")
-
-        # Нормализация имени канала
-        channel_name = channel_name if channel_name.startswith('@') else f"@{channel_name}"
-        logger.info(f"[{phone}] Поиск канала: {channel_name}")
-
-        # Поиск канала
-        result = await client.api.search_public_chat(username=channel_name)
-        if result and result.id:
-            logger.info(f"[{phone}] Канал найден: {result.title} (ID: {result.id})")
-            return result
-        else:
-            logger.warning(f"[{phone}] Канал {channel_name} не найден")
-            return None
-    except Exception as e:
-        logger.error(f"[{phone}] Ошибка при поиске канала: {str(e)}")
-        return None
 
 async def main():
-    """Основная функция"""
-    client = Client(settings=ClientSettings(api_id=int(api_id), api_hash=api_hash, phone_number=phone))
-    client.add_event_handler(auth_handler, update_type=API.Types.UPDATE_AUTHORIZATION_STATE)
+    phone = os.environ.get("PHONE")
+    api_id = os.environ.get("API_ID")
+    api_hash = os.environ.get("API_HASH")
+    channel = os.environ.get("CHANNEL")
+
+    if not all([phone, api_id, api_hash]):
+        logging.error("Не заданы все переменные окружения (PHONE, API_ID, API_HASH)")
+        return
+
+    logging.info(f"[{phone}] Запуск сессии...")
+
+    client = TdlibClient(
+        phone=phone,
+        api_id=int(api_id),
+        api_hash=api_hash,
+        session_path=SESSION_PATH,
+    )
 
     try:
-        # Запуск клиента
-        logger.info(f"[{phone}] Запуск сессии...")
-        await client.start()
+        await client.create_client()
 
-        # Поиск канала
+        chat = None
         if channel:
-            logger.info(f"[{phone}] Переменная CHANNEL: {channel}")
-            chat = await search_channel(client, channel)
-            if chat:
-                logger.info(f"[{phone}] Успешно найден канал: {chat.title}")
-            else:
-                logger.warning(f"[{phone}] Канал {channel} не найден")
+            logging.info(f"[{phone}] Ищем канал по имени: {channel}")
+            chat = await client.client.send(SearchPublicChat(username=channel))
         else:
-            logger.warning(f"[{phone}] Переменная CHANNEL не задана")
+            logging.warning(f"[{phone}] channel не задан — ничего не делаем")
+            return
+
+        if not chat:
+            logging.warning(f"[{phone}] Канал @{channel} не найден!")
+            return
+
+        sponsored = await client.get_sponsored_message(chat.id)
+        if not sponsored or not sponsored.messages:
+            logging.warning(f"[{phone}] Рекламных сообщений не найдено")
+            return
+
+        msg = sponsored.messages[0]
+        url = msg.sponsor_info.link
+        logging.info(f"[{phone}] Найдена реклама: {url}")
+
+        await client.click_sponsored_message(chat.id, msg.id)
+        await client.handle_sponsored_link(url)
 
     except Exception as e:
-        logger.error(f"[{phone}] Ошибка в main: {str(e)}")
+        logging.error(f"[{phone}] Ошибка: {e}")
     finally:
-        try:
-            await client.stop()
-        except asyncio.CancelledError:
-            logger.info("Клиент остановлен с отменой, продолжаем.")
+        await client.client.idle()
+        await client.stop()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
